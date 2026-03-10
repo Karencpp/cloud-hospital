@@ -1,0 +1,17 @@
+# 开发环境的端口
+server:
+  port: 8080
+
+spring:
+  # 开发环境的数据库连接
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/cloud_hospital?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&allowMultiQueries=true
+    username: root
+    password: 123456 # TODO: 改成你本地的密码
+
+mybatis-plus:
+  configuration:
+    # 强烈建议：只在 dev 开发环境下开启 SQL 打印日志，线上 prod 环境一定要关掉（为了性能和安全）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    map-underscore-to-camel-case: true
