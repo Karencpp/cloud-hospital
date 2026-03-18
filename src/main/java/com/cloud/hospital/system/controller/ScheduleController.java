@@ -1,16 +1,15 @@
 package com.cloud.hospital.system.controller;
 
 import com.cloud.hospital.system.common.Result;
+import com.cloud.hospital.system.dto.AddScheduleDTO;
+import com.cloud.hospital.system.dto.ScheduleQueryDTO;
 import com.cloud.hospital.system.entity.Schedule;
 import com.cloud.hospital.system.service.IScheduleService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -41,5 +40,20 @@ public class ScheduleController {
 
         // Mock 数据，稍后我们在 Service 实现类里写真正的 LambdaQueryWrapper 查询
         return Result.success(list);
+    }
+    @PostMapping("/add")
+    @Operation(summary = "新增排班", description = "落库保存排班信息，并同步将号源预热至 Redis 中")
+    public Result<Void> addSchedule(@RequestBody AddScheduleDTO addScheduleDTO) {
+        scheduleService.addSchedule(addScheduleDTO);
+        return Result.success(null);
+    }
+    // ... 之前写的 add 接口 ...
+
+    @PostMapping("/page")
+    @Operation(summary = "动态分页查询排班", description = "根据科室、医生、日期等动态条件查询排班列表")
+    public Result<Object> pageQuery(@RequestBody ScheduleQueryDTO queryDTO) {
+        // 注意：这里的 Result<Object> 最好换成你项目里封装的分页返回对象
+        // 如果你还没有封装通用的 PageResult，可以直接返回 MyBatis-Plus 的 Page 对象
+        return Result.success(scheduleService.pageQuery(queryDTO));
     }
 }

@@ -1,5 +1,8 @@
 package com.cloud.hospital.system.service;
 
+import com.cloud.hospital.system.common.PageResult;
+import com.cloud.hospital.system.dto.AddScheduleDTO;
+import com.cloud.hospital.system.dto.ScheduleQueryDTO;
 import com.cloud.hospital.system.entity.Schedule;
 import com.baomidou.mybatisplus.extension.service.IService;
 import org.springframework.cglib.core.Local;
@@ -18,4 +21,8 @@ import java.util.List;
 public interface IScheduleService extends IService<Schedule> {
 
     List<Schedule> findSchedules(Long doctorId, LocalDate startDate, LocalDate endDate);
+
+    void addSchedule(AddScheduleDTO addScheduleDTO);
+
+    PageResult<Schedule> pageQuery(ScheduleQueryDTO queryDTO);
 }

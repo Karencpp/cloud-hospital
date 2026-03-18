@@ -3,6 +3,7 @@ package com.cloud.hospital.system.mapper;
 import com.cloud.hospital.system.entity.RegistrationOrder;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Update;
 
 /**
  * <p>
@@ -14,5 +15,6 @@ import org.apache.ibatis.annotations.Mapper;
  */
 @Mapper
 public interface RegistrationOrderMapper extends BaseMapper<RegistrationOrder> {
-
+    @Update("UPDATE `registration_order` SET status = 2 WHERE id = #{id} AND status = 0")
+    int cancelOrderIfUnpaid(Long orderId);
 }
