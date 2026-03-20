@@ -77,5 +77,5 @@ public class Schedule implements Serializable {
 
     @TableField("is_deleted")
     @TableLogic
-    private Byte isDeleted;
+    private Byte isDeleted;  //0代表没有删除, 1代表已删除
 }

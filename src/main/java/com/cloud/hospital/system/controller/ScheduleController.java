@@ -56,4 +56,20 @@ public class ScheduleController {
         // 如果你还没有封装通用的 PageResult，可以直接返回 MyBatis-Plus 的 Page 对象
         return Result.success(scheduleService.pageQuery(queryDTO));
     }
+
+    @PostMapping("/delete/{id}")
+    @Operation(summary = "逻辑删除排班", description = "将排班状态设为 0，并同步删除 Redis 缓存")
+    public Result<Void> deleteSchedule(@PathVariable Long id) {
+        scheduleService.deleteSchedule(id);
+        return Result.success(null);
+    }
+
+    @PostMapping("/update/capacity")
+    @Operation(summary = "修改总号源数", description = "更新排班总号源，并根据预约情况同步更新可用号源和 Redis 缓存")
+    public Result<Void> updateCapacity(
+            @RequestParam Long id,
+            @RequestParam Integer newTotalNum) {
+        scheduleService.updateCapacity(id, newTotalNum);
+        return Result.success(null);
+    }
 }

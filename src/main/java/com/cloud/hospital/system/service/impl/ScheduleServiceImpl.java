@@ -10,7 +10,6 @@ import com.cloud.hospital.system.entity.Schedule;
 import com.cloud.hospital.system.mapper.ScheduleMapper;
 import com.cloud.hospital.system.service.IScheduleService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.cloud.hospital.system.task.ScheduleInventoryWarmupTask;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -132,5 +131,56 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
         }
 
         return schedule;
+    }
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteSchedule(Long scheduleId) {
+        // 1. 查询排班是否存在
+        Schedule schedule = this.getById(scheduleId);
+        if (schedule == null) {
+            throw new RuntimeException("排班不存在");
+        }
+
+        // 2. 校验是否已被预约：available_num 必须等于 total_num
+        if (!schedule.getAvailableNum().equals(schedule.getTotalNum())) {
+            throw new RuntimeException("该排班已有预约，无法删除");
+        }
+
+        // 3. 逻辑删除：使用 MyBatis-Plus 的 removeById 触发软删除
+        this.removeById(scheduleId);
+
+        // 4. 同步删除 Redis 缓存
+        String redisKey = RedisKeyPrefix.SCHEDULE_INV_KEY_PREFIX + scheduleId;
+        stringRedisTemplate.delete(redisKey);
+
+        log.info("逻辑删除排班成功，排班id:{}", scheduleId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateCapacity(Long id, Integer newTotalNum) {
+        // 1. 查询并校验
+        Schedule schedule = this.getById(id);
+        if (schedule == null || schedule.getStatus() == 0) {
+            throw new RuntimeException("排班信息不存在或已删除");
+        }
+
+        if (newTotalNum < (schedule.getTotalNum() - schedule.getAvailableNum())) {
+            throw new RuntimeException("新的总号源数不能小于已预约人数");
+        }
+
+        // 2. 计算差值并更新可用号源
+        int diff = newTotalNum - schedule.getTotalNum();
+        schedule.setTotalNum(newTotalNum);
+        schedule.setAvailableNum(schedule.getAvailableNum() + diff);
+
+        // 3. 更新数据库
+        this.updateById(schedule);
+
+        // 4. 同步 Redis 缓存
+        String redisKey = RedisKeyPrefix.SCHEDULE_INV_KEY_PREFIX + id;
+        stringRedisTemplate.opsForValue().set(redisKey, String.valueOf(schedule.getAvailableNum()));
+
+        log.info("修改总号源成功，排班id:{}, 新总数:{}, 新可用数:{}", id, newTotalNum, schedule.getAvailableNum());
     }
 }

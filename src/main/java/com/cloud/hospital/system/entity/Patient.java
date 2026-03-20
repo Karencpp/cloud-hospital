@@ -58,5 +58,5 @@ public class Patient implements Serializable {
     @Schema(description = "逻辑删除标识：0-未删除, 1-已删除")
     @TableField("is_deleted")
     @TableLogic
-    private Byte isDeleted;
+    private Byte isDeleted; //0代表没有删除, 1代表已删除
 }

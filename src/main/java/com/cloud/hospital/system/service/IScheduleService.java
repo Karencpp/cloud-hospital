@@ -25,4 +25,8 @@ public interface IScheduleService extends IService<Schedule> {
     void addSchedule(AddScheduleDTO addScheduleDTO);
 
     PageResult<Schedule> pageQuery(ScheduleQueryDTO queryDTO);
+
+    void deleteSchedule(Long scheduleId);
+
+    void updateCapacity(Long id, Integer newTotalNum);
 }
