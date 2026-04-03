@@ -58,9 +58,16 @@ public class ScheduleController {
     }
 
     @PostMapping("/delete/{id}")
-    @Operation(summary = "逻辑删除排班", description = "将排班状态设为 0，并同步删除 Redis 缓存")
+    @Operation(summary = "逻辑删除排班", description = "将is_deleted字段设为 1，并同步删除 Redis 缓存")
     public Result<Void> deleteSchedule(@PathVariable Long id) {
         scheduleService.deleteSchedule(id);
+        return Result.success(null);
+    }
+
+    @PostMapping("/restore/{id}")
+    @Operation(summary = "撤销删除排班", description = "将is_deleted字段恢复为 0，并重新预热排班余号到 Redis")
+    public Result<Void> restoreSchedule(@PathVariable Long id) {
+        scheduleService.restoreSchedule(id);
         return Result.success(null);
     }
 

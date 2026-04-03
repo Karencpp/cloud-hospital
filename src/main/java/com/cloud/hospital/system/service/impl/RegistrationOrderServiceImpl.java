@@ -1,5 +1,6 @@
 package com.cloud.hospital.system.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.cloud.hospital.system.MyException.BusinessException;
 import com.cloud.hospital.system.Utils.IdGenerator;
@@ -7,6 +8,7 @@ import com.cloud.hospital.system.common.OrderStatusEnum;
 import com.cloud.hospital.system.config.RabbitMQConfig;
 import com.cloud.hospital.system.constant.ExceptionCode;
 import com.cloud.hospital.system.constant.RedisKeyPrefix;
+import com.cloud.hospital.system.context.AuthContext;
 import com.cloud.hospital.system.dto.BookOrderDTO;
 import com.cloud.hospital.system.entity.RegistrationOrder;
 import com.cloud.hospital.system.entity.Schedule;
@@ -14,16 +16,17 @@ import com.cloud.hospital.system.mapper.RegistrationOrderMapper;
 import com.cloud.hospital.system.service.IRegistrationOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.cloud.hospital.system.service.IScheduleService;
-import com.cloud.hospital.system.task.ScheduleInventoryWarmupTask;
+import com.cloud.hospital.system.vo.OrderAsyncResultVO;
 import com.cloud.hospital.system.vo.OrderResultVO;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -37,6 +40,40 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class RegistrationOrderServiceImpl extends ServiceImpl<RegistrationOrderMapper, RegistrationOrder> implements IRegistrationOrderService {
+
+    private static final DefaultRedisScript<Long> PRE_DEDUCT_SCRIPT = new DefaultRedisScript<>(
+            "local scheduleInvKey = KEYS[1]\n" +
+            "local patientLimitKey = KEYS[2]\n" +
+            "local patientId = ARGV[1]\n" +
+            "local expireTime = ARGV[2]\n" +
+            "\n" +
+            "-- 1. 检查是否已经抢过（防重复下单）\n" +
+            "local hasBooked = redis.call('SISMEMBER', patientLimitKey, patientId)\n" +
+            "if hasBooked == 1 then\n" +
+            "    return -4 -- 重复下单\n" +
+            "end\n" +
+            "\n" +
+            "-- 2. 检查库存是否存在\n" +
+            "local v = redis.call('GET', scheduleInvKey)\n" +
+            "if not v then return -2 end\n" +
+            "\n" +
+            "-- 3. 检查库存是否充足\n" +
+            "local n = tonumber(v)\n" +
+            "if not n then return -3 end\n" +
+            "if n <= 0 then return -1 end\n" +
+            "\n" +
+            "-- 4. 扣减库存\n" +
+            "n = redis.call('DECR', scheduleInvKey)\n" +
+            "\n" +
+            "-- 5. 记录该患者已抢成功，并设置过期时间（例如一天）\n" +
+            "redis.call('SADD', patientLimitKey, patientId)\n" +
+            "redis.call('EXPIRE', patientLimitKey, expireTime)\n" +
+            "\n" +
+            "return n\n",
+            Long.class
+    );
+    private static final Duration ORDER_RESULT_CACHE_TTL = Duration.ofMinutes(10);
+
     @Autowired
     private IScheduleService scheduleService;
     @Autowired
@@ -49,7 +86,10 @@ public class RegistrationOrderServiceImpl extends ServiceImpl<RegistrationOrderM
     @Transactional(rollbackFor = Exception.class)
     public OrderResultVO bookOrder(BookOrderDTO bookOrderDTO) {
 
-        Long patientId =   bookOrderDTO.getPatientId();
+        Long patientId = AuthContext.getPatientId();
+        if (patientId == null) {
+            throw new RuntimeException("请先登录");
+        }
         Long scheduleId =   bookOrderDTO.getScheduleId();
 
         log.info(">>> 收到下单请求: 患者ID={}, 排班ID={}", patientId, scheduleId);
@@ -60,29 +100,232 @@ public class RegistrationOrderServiceImpl extends ServiceImpl<RegistrationOrderM
         //检查是否命中缓存
         checkIfHitCache(redisKey, scheduleId);
 
-        Long remainNum = stringRedisTemplate.opsForValue().decrement(redisKey);
-        if(remainNum ==null || remainNum<0){
-            stringRedisTemplate.opsForValue().increment(redisKey);
+        Long remainNum = preDeductWithLua(redisKey, scheduleId, patientId);
+        if (remainNum == null) {
+            throw new BusinessException(ExceptionCode.SYSTEM_BUSY, "当前抢号人数过多，系统繁忙，请重试！");
+        }
+        if (remainNum == -4) {
+            log.warn("下单失败: 重复下单, 患者ID={}, 排班ID={}", patientId, scheduleId);
+            throw new BusinessException(ExceptionCode.SYSTEM_BUSY, "您已预约过该排班，请勿重复下单！");
+        }
+        if (remainNum < 0) {
             log.warn("下单失败: 剩余库存不足, 排班ID={}", bookOrderDTO.getScheduleId());
-            throw new BusinessException(ExceptionCode.SOURCE_NOT_ENOUGH,"号抢没了,换一个号源试试");
-        }else{
-            log.info(">>> [预扣成功] 剩余库存充足, 排班ID={}", scheduleId);
+            throw new BusinessException(ExceptionCode.SOURCE_NOT_ENOUGH, "号抢没了,换一个号源试试");
         }
 
-        //下面开始更新数据库库存
+        log.info(">>> [预扣成功] 剩余库存充足, 排班ID={}", scheduleId);
 
+        Schedule schedule = scheduleService.getById(scheduleId);
+        if (schedule == null) {
+            rollbackRedisDeduct(redisKey, scheduleId, patientId);
+            throw new RuntimeException("该排班不存在");
+        }
+
+        long snowflakeId = idGenerator.nextId();
+        String orderNo = "ORD" + snowflakeId;
+
+        String createOrderMessage = snowflakeId + "," + orderNo + "," + patientId + "," + scheduleId;
         try {
-            //从缓存中更新, 并更新数据库
-            OrderResultVO orderResultVO = checkAndUpdateDB(scheduleId, patientId);
-                return  orderResultVO;
-
+            rabbitTemplate.convertAndSend(
+                    RabbitMQConfig.ORDER_CREATE_EXCHANGE,
+                    RabbitMQConfig.ORDER_CREATE_ROUTING_KEY,
+                    createOrderMessage
+            );
+            stringRedisTemplate.opsForValue().set(
+                    RedisKeyPrefix.ORDER_RESULT_KEY_PREFIX + orderNo,
+                    "PROCESSING",
+                    ORDER_RESULT_CACHE_TTL
+            );
         } catch (Exception e) {
-            log.error(">>> [下单异常] 数据库落库失败，回滚Redis库存，排班ID: {}", scheduleId, e);
-            stringRedisTemplate.opsForValue().increment(redisKey);
-
-            // 重新抛出异常，让 Spring 的 @Transactional 帮我们把 MySQL 的半截子数据回滚掉
-            throw e;
+            log.error(">>> [下单异常] 下单消息投递失败，回滚Redis库存，排班ID: {}", scheduleId, e);
+            rollbackRedisDeduct(redisKey, scheduleId, patientId);
+            stringRedisTemplate.opsForValue().set(
+                    RedisKeyPrefix.ORDER_RESULT_KEY_PREFIX + orderNo,
+                    "FAILED",
+                    ORDER_RESULT_CACHE_TTL
+            );
+            throw new BusinessException(ExceptionCode.SYSTEM_BUSY, "系统繁忙，请稍后重试");
         }
+
+        return OrderResultVO.builder()
+                .orderNo(orderNo)
+                .payAmount(schedule.getAmount())
+                .status(OrderStatusEnum.WAITING_PAY.getCode())
+                .build();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelOrder(Long orderId) {
+        if (orderId == null) {
+            throw new RuntimeException("订单ID不能为空");
+        }
+
+        RegistrationOrder order = this.getById(orderId);
+        if (order == null) {
+            throw new RuntimeException("订单不存在");
+        }
+        Long currentPatientId = AuthContext.getPatientId();
+        if (currentPatientId == null) {
+            throw new RuntimeException("请先登录");
+        }
+        if (!currentPatientId.equals(order.getPatientId())) {
+            throw new RuntimeException("无权操作该订单");
+        }
+
+        if (order.getStatus() == OrderStatusEnum.CANCELLED) {
+            return;
+        }
+        if (order.getStatus() != OrderStatusEnum.WAITING_PAY) {
+            throw new RuntimeException("当前订单状态无法取消");
+        }
+
+        int updated = this.baseMapper.cancelOrderIfUnpaid(orderId);
+        if (updated <= 0) {
+            return;
+        }
+
+        releaseScheduleStock(order.getScheduleId());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void payOrder(Long orderId) {
+        if (orderId == null) {
+            throw new RuntimeException("订单ID不能为空");
+        }
+
+        RegistrationOrder order = this.getById(orderId);
+        if (order == null) {
+            throw new RuntimeException("订单不存在");
+        }
+        Long currentPatientId = AuthContext.getPatientId();
+        if (currentPatientId == null) {
+            throw new RuntimeException("请先登录");
+        }
+        if (!currentPatientId.equals(order.getPatientId())) {
+            throw new RuntimeException("无权操作该订单");
+        }
+
+        if (order.getStatus() == OrderStatusEnum.PAID) {
+            return;
+        }
+        if (order.getStatus() == OrderStatusEnum.CANCELLED) {
+            throw new RuntimeException("订单已取消，无法支付");
+        }
+        if (order.getStatus() != OrderStatusEnum.WAITING_PAY) {
+            throw new RuntimeException("当前订单状态无法支付");
+        }
+
+        LambdaUpdateWrapper<RegistrationOrder> updateWrapper = new LambdaUpdateWrapper<>();
+        updateWrapper.set(RegistrationOrder::getStatus, OrderStatusEnum.PAID)
+                .eq(RegistrationOrder::getId, orderId)
+                .eq(RegistrationOrder::getStatus, OrderStatusEnum.WAITING_PAY);
+
+        boolean updated = this.update(updateWrapper);
+        if (!updated) {
+            throw new RuntimeException("订单状态更新失败");
+        }
+    }
+
+    @Override
+    public OrderAsyncResultVO queryOrderResult(String orderNo) {
+        if (orderNo == null || orderNo.trim().isEmpty()) {
+            throw new RuntimeException("订单号不能为空");
+        }
+
+        RegistrationOrder order = this.getOne(new LambdaQueryWrapper<RegistrationOrder>()
+                .eq(RegistrationOrder::getOrderNo, orderNo)
+                .last("limit 1"));
+        Long currentPatientId = AuthContext.getPatientId();
+        if (currentPatientId == null) {
+            throw new RuntimeException("请先登录");
+        }
+        if (order != null) {
+            if (!currentPatientId.equals(order.getPatientId())) {
+                throw new RuntimeException("无权查看该订单");
+            }
+            return OrderAsyncResultVO.builder()
+                    .orderNo(order.getOrderNo())
+                    .processState("SUCCESS")
+                    .status(order.getStatus().getCode())
+                    .payAmount(order.getPayAmount())
+                    .message("下单成功")
+                    .build();
+        }
+
+        String cachedState = stringRedisTemplate.opsForValue().get(RedisKeyPrefix.ORDER_RESULT_KEY_PREFIX + orderNo);
+        if ("PROCESSING".equals(cachedState)) {
+            return OrderAsyncResultVO.builder()
+                    .orderNo(orderNo)
+                    .processState("PROCESSING")
+                    .message("排队处理中，请稍后刷新")
+                    .build();
+        }
+        if ("FAILED".equals(cachedState)) {
+            return OrderAsyncResultVO.builder()
+                    .orderNo(orderNo)
+                    .processState("FAILED")
+                    .message("下单失败，请重试")
+                    .build();
+        }
+
+        return OrderAsyncResultVO.builder()
+                .orderNo(orderNo)
+                .processState("FAILED")
+                .message("订单不存在或处理结果已过期")
+                .build();
+    }
+
+    private Long preDeductWithLua(String redisKey, Long scheduleId, Long patientId) {
+        String patientLimitKey = "cloud_hospital:schedule:booked:" + scheduleId;
+        // 默认记录一天（86400秒）
+        String expireTime = "86400";
+        
+        Long result = stringRedisTemplate.execute(
+                PRE_DEDUCT_SCRIPT, 
+                java.util.Arrays.asList(redisKey, patientLimitKey),
+                String.valueOf(patientId),
+                expireTime
+        );   
+        
+        if (result != null && result == -2) {
+            checkIfHitCache(redisKey, scheduleId);
+            result = stringRedisTemplate.execute(
+                    PRE_DEDUCT_SCRIPT, 
+                    java.util.Arrays.asList(redisKey, patientLimitKey),
+                    String.valueOf(patientId),
+                    expireTime
+            );
+        }
+        return result;
+    }
+
+    private void rollbackRedisDeduct(String redisKey, Long scheduleId, Long patientId) {
+        stringRedisTemplate.opsForValue().increment(redisKey);
+        String patientLimitKey = "cloud_hospital:schedule:booked:" + scheduleId;
+        stringRedisTemplate.opsForSet().remove(patientLimitKey, String.valueOf(patientId));
+    }
+
+    private void releaseScheduleStock(Long scheduleId) {
+        if (scheduleId == null) {
+            return;
+        }
+
+        LambdaUpdateWrapper<Schedule> updateWrapper = new LambdaUpdateWrapper<>();
+        updateWrapper.setSql("available_num = available_num + 1, version = version + 1")
+                .eq(Schedule::getId, scheduleId)
+                .apply("available_num < total_num");
+
+        scheduleService.update(updateWrapper);
+
+        Schedule schedule = scheduleService.getById(scheduleId);
+        String redisKey = RedisKeyPrefix.SCHEDULE_INV_KEY_PREFIX + scheduleId;
+        if (schedule == null) {
+            stringRedisTemplate.delete(redisKey);
+            return;
+        }
+        stringRedisTemplate.opsForValue().set(redisKey, String.valueOf(schedule.getAvailableNum()));
     }
 
     private void checkIfHitCache(String redisKey, Long scheduleId) {
@@ -133,70 +376,4 @@ public class RegistrationOrderServiceImpl extends ServiceImpl<RegistrationOrderM
         }
         }
 
-    private OrderResultVO checkAndUpdateDB(Long scheduleId,Long patientId){
-        // 1. 先查询排班是否存在
-        Schedule schedule = scheduleService.getById(scheduleId);
-        if (schedule == null) {
-            log.warn("下单失败: 排班记录不存在, ID={}", scheduleId);
-            throw new RuntimeException("该排班不存在");
-        }
-
-        // 2. 核心：乐观锁扣减库存
-        // UPDATE schedule SET available_num = available_num - 1, version = version + 1
-        // WHERE id = ? AND version = ? AND available_num > 0
-        LambdaUpdateWrapper<Schedule> updateWrapper = new LambdaUpdateWrapper<>();
-        updateWrapper.setSql("available_num = available_num - 1, version = version + 1")
-                .eq(Schedule::getId, scheduleId)
-                .eq(Schedule::getVersion, schedule.getVersion()) // 乐观锁：版本号匹配
-                .gt(Schedule::getAvailableNum, 0);               // 兜底：余号必须大于0
-
-        boolean updateSuccess = scheduleService.update(updateWrapper);
-
-        if (!updateSuccess) {
-            log.error("抢号失败: 触发高并发冲突或号源已抢光, 排班ID={}", scheduleId);
-            throw new BusinessException(ExceptionCode.SOURCE_NOT_ENOUGH,"号抢没了,换一个号源试试");
-        }
-
-
-        log.info("库存扣减成功，开始生成订单...");
-        // 3. 生成全局唯一的订单号 (雪花算法)
-        long snowflakeId = idGenerator.nextId();
-        String orderNo = "ORD" + snowflakeId;
-        log.info(">>> 订单号生成成功: {}", orderNo);
-
-
-        RegistrationOrder order = RegistrationOrder.builder()
-                .orderNo(orderNo)
-                .id(snowflakeId)
-                .patientId(patientId)
-                .scheduleId(schedule.getId())
-                .departmentId(schedule.getDepartmentId())
-                .doctorId(schedule.getDoctorId())
-                .reserveTime(schedule.getWorkDate().atStartOfDay())
-                .status(OrderStatusEnum.WAITING_PAY)
-                .payAmount(schedule.getAmount())
-                .createTime(LocalDateTime.now())
-                .build();
-        this.save(order);
-
-        Long orderId = order.getId();
-
-        //把订单ID发送到延迟队列
-        rabbitTemplate.convertAndSend(
-                RabbitMQConfig.ORDER_TTL_EXCHANGE,
-                RabbitMQConfig.ORDER_TTL_ROUTING_KEY,
-                String.valueOf(orderId)
-        );
-
-        log.info("订单生成成功，订单ID: {}", orderId);
-
-
-        // 5. 使用静态工厂或 Builder 模式返回 VO
-        return OrderResultVO.builder()
-                .orderNo(order.getOrderNo())
-                .payAmount(order.getPayAmount())
-                .status(order.getStatus().getCode()) // 返回枚举对应的数值 0
-                .build();
-
-    }
 }

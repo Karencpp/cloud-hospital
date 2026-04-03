@@ -6,12 +6,12 @@ spring:
   # 开发环境的数据库连接
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/cloud_hospital?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&allowMultiQueries=true
+    url: jdbc:mysql://172.29.120.166:3306/cloud_hospital?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&allowMultiQueries=true
     username: root
     password: root #
   rabbitmq:
       # 同样通过 localhost 访问映射出来的 5672 端口
-      host: localhost
+      host: 172.29.120.166
       port: 5672
       # 默认用户名和密码都是 guest
       username: guest
@@ -22,7 +22,7 @@ spring:
           acknowledge-mode: manual
   data:
     redis:
-      host: 127.0.0.1
+      host: 172.29.120.166
       port: 6379
 #      password: 123456
       database: 0
@@ -39,3 +39,15 @@ mybatis-plus:
     # 强烈建议：只在 dev 开发环境下开启 SQL 打印日志，线上 prod 环境一定要关掉（为了性能和安全）
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
     map-underscore-to-camel-case: true
+
+aliyun:
+  sms:
+    mock: true
+    region-id: cn-hangzhou
+    access-key-id: ${ALIYUN_SMS_ACCESS_KEY_ID:}
+    access-key-secret: ${ALIYUN_SMS_ACCESS_KEY_SECRET:}
+    sign-name: ${ALIYUN_SMS_SIGN_NAME:}
+    template-code: ${ALIYUN_SMS_TEMPLATE_CODE:}
+
+jwt:
+  secret: cloud-hospital-jwt-secret-key-please-change-32chars

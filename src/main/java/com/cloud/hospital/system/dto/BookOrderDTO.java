@@ -9,7 +9,4 @@ public class BookOrderDTO {
 
     @Schema(description = "要抢的排班ID", requiredMode = Schema.RequiredMode.REQUIRED, example = "1001")
     private Long scheduleId;
-
-    @Schema(description = "当前就诊患者ID", requiredMode = Schema.RequiredMode.REQUIRED, example = "999")
-    private Long patientId;
 }

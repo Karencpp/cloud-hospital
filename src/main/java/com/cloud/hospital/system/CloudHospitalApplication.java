@@ -18,5 +18,7 @@ public class CloudHospitalApplication {
         System.out.println("==================================================");
         System.out.println("🚀🚀🚀 云医院后端系统 (Spring Boot 3.x) 启动成功! 🚀🚀🚀");
         System.out.println("==================================================");
+        System.out.println(args);
+
     }
 }

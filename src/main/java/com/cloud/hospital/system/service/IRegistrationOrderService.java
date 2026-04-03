@@ -3,6 +3,7 @@ package com.cloud.hospital.system.service;
 import com.cloud.hospital.system.dto.BookOrderDTO;
 import com.cloud.hospital.system.entity.RegistrationOrder;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.cloud.hospital.system.vo.OrderAsyncResultVO;
 import com.cloud.hospital.system.vo.OrderResultVO;
 
 /**
@@ -16,4 +17,10 @@ import com.cloud.hospital.system.vo.OrderResultVO;
 public interface IRegistrationOrderService extends IService<RegistrationOrder> {
 
     OrderResultVO bookOrder(BookOrderDTO bookOrderDTO);
+
+    void cancelOrder(Long orderId);
+
+    void payOrder(Long orderId);
+
+    OrderAsyncResultVO queryOrderResult(String orderNo);
 }

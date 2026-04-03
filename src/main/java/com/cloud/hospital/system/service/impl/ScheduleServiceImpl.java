@@ -183,4 +183,25 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
 
         log.info("修改总号源成功，排班id:{}, 新总数:{}, 新可用数:{}", id, newTotalNum, schedule.getAvailableNum());
     }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void restoreSchedule(Long scheduleId) {
+        if (scheduleId == null) {
+            throw new RuntimeException("排班ID不能为空");
+        }
+
+        int affected = this.baseMapper.restoreById(scheduleId);
+        if (affected == 0) {
+            throw new RuntimeException("排班不存在或未被删除");
+        }
+
+        Schedule schedule = this.getById(scheduleId);
+        if (schedule == null) {
+            throw new RuntimeException("排班不存在");
+        }
+
+        String redisKey = RedisKeyPrefix.SCHEDULE_INV_KEY_PREFIX + scheduleId;
+        stringRedisTemplate.opsForValue().set(redisKey, String.valueOf(schedule.getAvailableNum()));
+    }
 }

@@ -29,4 +29,6 @@ public interface IScheduleService extends IService<Schedule> {
     void deleteSchedule(Long scheduleId);
 
     void updateCapacity(Long id, Integer newTotalNum);
+
+    void restoreSchedule(Long scheduleId);
 }

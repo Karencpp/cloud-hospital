@@ -21,7 +21,7 @@ public class GlobalExceptionHandler {
     public Result<Object> handleRuntimeException(RuntimeException e) {
         log.error("检测到业务异常: ", e);
         // 返回 500 错误码和具体的报错信息
-        return Result.error(500, "发生错误");
+        return Result.error(500, e.getMessage());
     }
 
     /**
